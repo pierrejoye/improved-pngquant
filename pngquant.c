@@ -40,8 +40,14 @@ use --force to overwrite.\n"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <stdbool.h>
-#include <getopt.h>
+#ifdef _MSC_VER
+# define true  1
+# define false 0
+# include "getopt.h"
+#else
+# include <stdbool.h>
+# include <getopt.h>
+#endif
 
 #if defined(WIN32) || defined(__WIN32__)
 #  include <fcntl.h>    /* O_BINARY */
@@ -91,6 +97,29 @@ static pngquant_error write_image(png8_image *output_image, png24_image *output_
 static char *add_filename_extension(const char *filename, const char *newext);
 static bool file_exists(const char *outname);
 
+#ifdef WIN32
+static void verbose_printf(const struct pngquant_options *context, const char *fmt, ...)
+{
+    if (context->log_callback) {
+        va_list va;
+		int required_space;
+		char *buf;
+        va_start(va, fmt);
+
+        va_end(va);
+		required_space = vsnprintf(NULL, 0, fmt, va) + 1; // +\0
+		buf = malloc(required_space);
+		if (!buf) {
+			return;
+		}
+		memset(buf, 0, required_space);
+        vsnprintf(buf, required_space, fmt, va);
+
+        context->log_callback(context->log_callback_context, buf);
+		free(buf);
+	}
+}
+#else
 static void verbose_printf(const struct pngquant_options *context, const char *fmt, ...)
 {
     if (context->log_callback) {
@@ -105,9 +134,9 @@ static void verbose_printf(const struct pngquant_options *context, const char *f
         va_end(va);
 
         context->log_callback(context->log_callback_context, buf);
-    }
+	}
 }
-
+#endif
 inline static void verbose_print(const struct pngquant_options *context, const char *msg)
 {
     if (context->log_callback) context->log_callback(context->log_callback_context, msg);
@@ -210,6 +239,7 @@ static bool parse_quality(const char *quality, struct pngquant_options *options)
     const char *str = quality; char *end;
 
     long t1 = strtol(str, &end, 10);
+
     if (str == end) return false;
     str = end;
 
@@ -256,12 +286,13 @@ static const struct {const char *old; char *new;} obsolete_options[] = {
 
 static void fix_obsolete_options(const unsigned int argc, char *argv[])
 {
-    for(unsigned int argn=1; argn < argc; argn++) {
+	unsigned int argn, i;
+    for(argn=1; argn < argc; argn++) {
         if ('-' != argv[argn][0]) continue;
 
         if ('-' == argv[argn][1]) break; // stop on first --option or --
 
-        for(unsigned int i=0; i < sizeof(obsolete_options)/sizeof(obsolete_options[0]); i++) {
+        for(i=0; i < sizeof(obsolete_options)/sizeof(obsolete_options[0]); i++) {
             if (0 == strcmp(obsolete_options[i].old, argv[argn])) {
                 fprintf(stderr, "  warning: option '%s' has been replaced with '%s'.\n", obsolete_options[i].old, obsolete_options[i].new);
                 argv[argn] = obsolete_options[i].new;
@@ -269,7 +300,6 @@ static void fix_obsolete_options(const unsigned int argc, char *argv[])
         }
     }
 }
-
 enum {arg_floyd=1, arg_ordered, arg_ext, arg_no_force, arg_iebug, arg_transbug, arg_quality};
 
 static const struct option long_options[] = {
@@ -293,22 +323,43 @@ int pngquant_file(const char *filename, const char *newext, struct pngquant_opti
 
 int main(int argc, char *argv[])
 {
+struct pngquant_options {
+    double target_mse, max_mse;
+    float min_opaque_val;
+    unsigned int reqcolors;
+    unsigned int speed_tradeoff;
+    bool floyd, last_index_transparent;
+    bool using_stdin, force;
+    void (*log_callback)(void *context, const char *msg);
+    void (*log_callback_flush)(void *context);
+    void *log_callback_context;
+};
+
     struct pngquant_options options = {
-        .reqcolors = 256,
-        .floyd = true, // floyd-steinberg dithering
-        .min_opaque_val = 1, // whether preserve opaque colors for IE (1.0=no, does not affect alpha)
-        .speed_tradeoff = 3, // 1 max quality, 10 rough & fast. 3 is optimum.
-        .last_index_transparent = false, // puts transparent color at last index. This is workaround for blu-ray subtitles.
-        .target_mse = 0,
-        .max_mse = MAX_DIFF,
+        /* target_mse */			 0,
+        /* max_mse */				 MAX_DIFF,
+
+		/* whether preserve opaque colors for IE (1.0=no, does not affect alpha) */
+        /* min_opaque_val */		 1,
+        /* reqcolors */				 256,
+        /* speed_tradeoff */		 3, // 1 max quality, 10 rough & fast. 3 is optimum.
+        /* floyd */					 true, // floyd-steinberg dithering
+        /* last_index_transparent */ false, // puts transparent color at last index. This is workaround for blu-ray subtitles.
+		/* using_stdin */			 false,
+		/* force */ 				 false,
+		/* log_callback */			 NULL,
+		/* log_callback_flush */	 NULL,
+		/* log_callback_context */	 NULL
     };
     unsigned int error_count=0, skipped_count=0, file_count=0;
     pngquant_error latest_error=SUCCESS;
     const char *newext = NULL;
+    int opt;
+	int argn = optind;
 
     fix_obsolete_options(argc, argv);
 
-    int opt;
+
     do {
         opt = getopt_long(argc, argv, "Vvqfhs:", long_options, NULL);
         switch (opt) {
@@ -359,8 +410,6 @@ int main(int argc, char *argv[])
         }
     } while (opt != -1);
 
-    int argn = optind;
-
     if (argn >= argc) {
         if (argn > 1) {
             fputs("No input files specified. See -h for help.\n", stderr);
@@ -369,101 +418,103 @@ int main(int argc, char *argv[])
             print_usage(stderr);
         }
         return MISSING_ARGUMENT;
-    }
+    } else {
+		char *colors_end;
+		unsigned long colors = strtoul(argv[argn], &colors_end, 10);
+		register int num_files, i;
 
-    char *colors_end;
-    unsigned long colors = strtoul(argv[argn], &colors_end, 10);
-    if (colors_end != argv[argn] && '\0' == colors_end[0]) {
-        options.reqcolors = colors;
-        argn++;
-    }
+		if (colors_end != argv[argn] && '\0' == colors_end[0]) {
+			options.reqcolors = colors;
+			argn++;
+		}
 
-    if (options.reqcolors < 2 || options.reqcolors > 256) {
-        fputs("Number of colors must be between 2 and 256.\n", stderr);
-        return INVALID_ARGUMENT;
-    }
+		if (options.reqcolors < 2 || options.reqcolors > 256) {
+			fputs("Number of colors must be between 2 and 256.\n", stderr);
+			return INVALID_ARGUMENT;
+		}
 
-    // new filename extension depends on options used. Typically basename-fs8.png
-    if (newext == NULL) {
-        newext = options.floyd ? "-ie-fs8.png" : "-ie-or8.png";
-        if (options.min_opaque_val == 1.f) newext += 3; /* skip "-ie" */
-    }
+		// new filename extension depends on options used. Typically basename-fs8.png
+		if (newext == NULL) {
+			newext = options.floyd ? "-ie-fs8.png" : "-ie-or8.png";
+			if (options.min_opaque_val == 1.f) newext += 3; /* skip "-ie" */
+		}
 
-    if (argn == argc || (argn == argc-1 && 0==strcmp(argv[argn],"-"))) {
-        options.using_stdin = true;
-        argn = argc-1;
-    }
+		if (argn == argc || (argn == argc-1 && 0==strcmp(argv[argn],"-"))) {
+			options.using_stdin = true;
+			argn = argc-1;
+		}
 
 #if USE_SSE
-    if (!is_sse2_available()) {
-        print_full_version(stderr);
-        fputs("SSE2-capable CPU is required for this build.\n", stderr);
-        return WRONG_ARCHITECTURE;
-    }
+		if (!is_sse2_available()) {
+			print_full_version(stderr);
+			fputs("SSE2-capable CPU is required for this build.\n", stderr);
+			return WRONG_ARCHITECTURE;
+		}
 #endif
 
-    const int num_files = argc-argn;
+		num_files = argc-argn;
 
 #ifdef _OPENMP
-    // if there's a lot of files, coarse parallelism can be used
-    if (num_files > 2*omp_get_max_threads()) {
-        omp_set_nested(0);
-        omp_set_dynamic(1);
-    } else {
-        omp_set_nested(1);
-    }
+		// if there's a lot of files, coarse parallelism can be used
+		if (num_files > 2*omp_get_max_threads()) {
+			omp_set_nested(0);
+			omp_set_dynamic(1);
+		} else {
+			omp_set_nested(1);
+		}
 #endif
 
-    #pragma omp parallel for \
-        schedule(dynamic) reduction(+:skipped_count) reduction(+:error_count) reduction(+:file_count) shared(latest_error)
-    for(int i=0; i < num_files; i++) {
-        struct pngquant_options opts = options;
-        const char *filename = opts.using_stdin ? "stdin" : argv[argn+i];
+#pragma omp parallel for \
+	schedule(dynamic) reduction(+:skipped_count) reduction(+:error_count) reduction(+:file_count) shared(latest_error)
+		for(i=0; i < num_files; i++) {
+			struct pngquant_options opts = options;
+			const char *filename = opts.using_stdin ? "stdin" : argv[argn+i];
 
-        #ifdef _OPENMP
-        struct buffered_log buf = {};
-        if (opts.log_callback && omp_get_num_threads() > 1 && num_files > 1) {
-            verbose_printf_flush(&opts);
-            opts.log_callback = log_callback_buferred;
-            opts.log_callback_flush = log_callback_buferred_flush;
-            opts.log_callback_context = &buf;
-        }
-        #endif
+#ifdef _OPENMP
+			struct buffered_log buf = {};
+			if (opts.log_callback && omp_get_num_threads() > 1 && num_files > 1) {
+				verbose_printf_flush(&opts);
+				opts.log_callback = log_callback_buferred;
+				opts.log_callback_flush = log_callback_buferred_flush;
+				opts.log_callback_context = &buf;
+			}
+#endif
 
-        pngquant_error retval = pngquant_file(filename, newext, &opts);
+			pngquant_error retval = pngquant_file(filename, newext, &opts);
 
-        verbose_printf_flush(&opts);
+			verbose_printf_flush(&opts);
 
-        if (retval) {
-            #pragma omp critical
-            {
-                latest_error = retval;
-            }
-            if (retval == TOO_LOW_QUALITY) {
-                skipped_count++;
-            } else {
-                error_count++;
-            }
-        }
-        ++file_count;
-    }
+			if (retval) {
+#pragma omp critical
+				{
+					latest_error = retval;
+				}
+				if (retval == TOO_LOW_QUALITY) {
+					skipped_count++;
+				} else {
+					error_count++;
+				}
+			}
+			++file_count;
+		}
 
-    if (error_count) {
-        verbose_printf(&options, "There were errors quantizing %d file%s out of a total of %d file%s.",
-                       error_count, (error_count == 1)? "" : "s", file_count, (file_count == 1)? "" : "s");
-    }
-    if (skipped_count) {
-        verbose_printf(&options, "Skipped %d file%s out of a total of %d file%s.",
-                       skipped_count, (skipped_count == 1)? "" : "s", file_count, (file_count == 1)? "" : "s");
-    }
-    if (!skipped_count && !error_count) {
-        verbose_printf(&options, "No errors detected while quantizing %d image%s.",
-                       file_count, (file_count == 1)? "" : "s");
-    }
+		if (error_count) {
+			verbose_printf(&options, "There were errors quantizing %d file%s out of a total of %d file%s.",
+						   error_count, (error_count == 1)? "" : "s", file_count, (file_count == 1)? "" : "s");
+		}
+		if (skipped_count) {
+			verbose_printf(&options, "Skipped %d file%s out of a total of %d file%s.",
+						   skipped_count, (skipped_count == 1)? "" : "s", file_count, (file_count == 1)? "" : "s");
+		}
+		if (!skipped_count && !error_count) {
+			verbose_printf(&options, "No errors detected while quantizing %d image%s.",
+						   file_count, (file_count == 1)? "" : "s");
+		}
 
-    verbose_printf_flush(&options);
+		verbose_printf_flush(&options);
 
-    return latest_error;
+		return latest_error;
+	}
 }
 
 static void pngquant_image_free(pngquant_image *input_image)
@@ -501,10 +552,15 @@ static void pngquant_output_image_free(png8_image *output_image)
 int pngquant_file(const char *filename, const char *newext, struct pngquant_options *options)
 {
     int retval = 0;
+    char *outname = NULL;
+    pngquant_image input_image; // initializes all fields to 0
+    png8_image output_image;
 
     verbose_printf(options, "%s:", filename);
 
-    char *outname = NULL;
+	memset(&input_image, 0,  sizeof(pngquant_image));
+	memset(&output_image, 0, sizeof(png8_image));
+
     if (!options->using_stdin) {
         outname = add_filename_extension(filename,newext);
         if (!options->force && file_exists(outname)) {
@@ -513,25 +569,28 @@ int pngquant_file(const char *filename, const char *newext, struct pngquant_opti
         }
     }
 
-    pngquant_image input_image = {}; // initializes all fields to 0
+
     if (!retval) {
         retval = read_image(filename, options->using_stdin, &input_image.rwpng_image);
     }
 
-    png8_image output_image = {};
+
     if (!retval) {
+		histogram *hist;
+		colormap *palette;
+
         verbose_printf(options, "  read %luKB file corrected for gamma %2.1f",
                        (input_image.rwpng_image.file_size+1023UL)/1024UL, 1.0/input_image.rwpng_image.gamma);
 
         prepare_image(&input_image, options);
 
-        histogram *hist = get_histogram(&input_image, options);
+        hist = get_histogram(&input_image, options);
         if (input_image.noise) {
             free(input_image.noise);
             input_image.noise = NULL;
         }
 
-        colormap *palette = pngquant_quantize(hist, options);
+        palette = pngquant_quantize(hist, options);
         pam_freeacolorhist(hist);
 
         if (palette) {
@@ -581,9 +640,10 @@ static void sort_palette(colormap *map, const struct pngquant_options *options)
     ** the maximal alpha value (i.e., fully opaque) are at the end and can
     ** therefore be omitted from the tRNS chunk.
     */
+	unsigned int i;
+	unsigned int num_transparent=0;
 
-
-    if (options->last_index_transparent) for(unsigned int i=0; i < map->colors; i++) {
+    if (options->last_index_transparent) for(i = 0; i < map->colors; i++) {
         if (map->palette[i].acolor.a < 1.0/256.0) {
             const unsigned int old = i, transparent_dest = map->colors-1;
 
@@ -598,8 +658,8 @@ static void sort_palette(colormap *map, const struct pngquant_options *options)
         }
 
     /* move transparent colors to the beginning to shrink trns chunk */
-    unsigned int num_transparent=0;
-    for(unsigned int i=0; i < map->colors; i++) {
+
+    for(i=0; i < map->colors; i++) {
         if (map->palette[i].acolor.a < 255.0/256.0) {
             // current transparent color is swapped with earlier opaque one
             if (i != num_transparent) {
@@ -623,9 +683,10 @@ static void sort_palette(colormap *map, const struct pngquant_options *options)
 
 static void set_palette(png8_image *output_image, const colormap *map)
 {
+	unsigned int x;
     to_f_set_gamma(output_image->gamma);
 
-    for(unsigned int x = 0; x < map->colors; ++x) {
+    for(x = 0; x < map->colors; ++x) {
         rgb_pixel px = to_rgb(output_image->gamma, map->palette[x].acolor);
         map->palette[x].acolor = to_f(px); /* saves rounding error introduced by to_rgb, which makes remapping & dithering more accurate */
 
@@ -642,23 +703,29 @@ static float remap_to_palette(png24_image *input_image, png8_image *output_image
     unsigned char *const remapped = output_image->indexed_data;
     const int rows = input_image->height;
     const unsigned int cols = input_image->width;
-
-    to_f_set_gamma(input_image->gamma);
-
     int remapped_pixels=0;
     float remapping_error=0;
 
     struct nearest_map *const n = nearest_init(map);
-    const unsigned int transparent_ind = nearest_search(n, (f_pixel){0,0,0,0}, min_opaque_val, NULL);
+	const f_pixel px_0 = {0,0,0,0};
+    const unsigned int transparent_ind = nearest_search(n, px_0, min_opaque_val, NULL);
 
     const unsigned int max_threads = omp_get_max_threads();
-    viter_state average_color[map->colors * max_threads];
+	const unsigned int average_color_cnt = map->colors * max_threads;
+    viter_state *average_color;
+
+	int row;
+	average_color = (viter_state *)malloc(sizeof(viter_state) * map->colors * max_threads);
+    to_f_set_gamma(input_image->gamma);
+
+
     viter_init(map, max_threads, average_color);
 
-    #pragma omp parallel for if (rows*cols > 3000) \
-        default(none) shared(average_color) reduction(+:remapping_error) reduction(+:remapped_pixels)
-    for(int row = 0; row < rows; ++row) {
-        for(unsigned int col = 0; col < cols; ++col) {
+#pragma omp parallel for if (rows*cols > 3000) \
+     default(none) shared(average_color) reduction(+:remapping_error) reduction(+:remapped_pixels)
+    for(row = 0; row < rows; ++row) {
+		unsigned int col;
+        for(col = 0; col < cols; ++col) {
 
             f_pixel px = to_f(input_pixels[row][col]);
             unsigned int match;
@@ -682,19 +749,23 @@ static float remap_to_palette(png24_image *input_image, png8_image *output_image
     viter_finalize(map, max_threads, average_color);
 
     nearest_free(n);
-
+	free(average_color);
     return remapping_error / MAX(1,remapped_pixels);
 }
 
 static float distance_from_closest_other_color(const colormap *map, const unsigned int i)
 {
     float second_best=MAX_DIFF;
-    for(unsigned int j=0; j < map->colors; j++) {
-        if (i == j) continue;
-        float diff = colordifference(map->palette[i].acolor, map->palette[j].acolor);
-        if (diff <= second_best) {
-            second_best = diff;
-        }
+	unsigned int j;
+    for(j=0; j < map->colors; j++) {
+        if (i == j) {
+			continue;
+		} else {
+			const float diff = colordifference(map->palette[i].acolor, map->palette[j].acolor);
+			if (diff <= second_best) {
+				second_best = diff;
+			}
+		}
     }
     return second_best;
 }
@@ -713,7 +784,12 @@ inline static f_pixel get_dithered_pixel(const float dither_level, const float m
                 sb = thiserr.b * dither_level,
                 sa = thiserr.a * dither_level;
 
-    float ratio = 1.0;
+    register float ratio = 1.0;
+	register f_pixel px_ret;
+
+     // If dithering error is crazy high, don't propagate it that much
+     // This prevents crazy geen pixels popping out of the blue (or red or black! ;)
+     const float dither_error = sr*sr + sg*sg + sb*sb + sa*sa;
 
     // allowing some overflow prevents undithered bands caused by clamping of all channels
          if (px.r + sr > 1.03) ratio = MIN(ratio, (1.03-px.r)/sr);
@@ -725,22 +801,18 @@ inline static f_pixel get_dithered_pixel(const float dither_level, const float m
          if (px.a + sa > 1.03) ratio = MIN(ratio, (1.03-px.a)/sa);
     else if (px.a + sa < 0)    ratio = MIN(ratio, px.a/-sa);
 
-     // If dithering error is crazy high, don't propagate it that much
-     // This prevents crazy geen pixels popping out of the blue (or red or black! ;)
-     const float dither_error = sr*sr + sg*sg + sb*sb + sa*sa;
-     if (dither_error > max_dither_error) {
-         ratio *= 0.8;
-     } else if (dither_error < 2.f/256.f/256.f) {
-        // don't dither areas that don't have noticeable error — makes file smaller
-        return px;
-     }
+	if (dither_error > max_dither_error) {
+		ratio *= 0.8;
+	} else if (dither_error < 2.f/256.f/256.f) {
+		// don't dither areas that don't have noticeable error — makes file smaller
+		return px;
+	}
 
-     return (f_pixel){
-         .r=px.r + sr * ratio,
-         .g=px.g + sg * ratio,
-         .b=px.b + sb * ratio,
-         .a=px.a + sa * ratio,
-     };
+    px_ret.r = px.r + sr * ratio;
+    px_ret.g = px.g + sg * ratio;
+    px_ret.b = px.b + sb * ratio;
+    px_ret.a = px.a + sa * ratio;
+	return px_ret;
 }
 
 /**
@@ -753,27 +825,38 @@ static void remap_to_palette_floyd(png24_image *input_image, png8_image *output_
     const rgb_pixel *const *const input_pixels = (const rgb_pixel *const *const)input_image->row_pointers;
     unsigned char *const remapped = output_image->indexed_data;
     const unsigned int rows = input_image->height, cols = input_image->width;
-
-    to_f_set_gamma(input_image->gamma);
-
     const colormap_item *acolormap = map->palette;
 
     struct nearest_map *const n = nearest_init(map);
-    const unsigned int transparent_ind = nearest_search(n, (f_pixel){0,0,0,0}, min_opaque_val, NULL);
+	const f_pixel px_0 = {0,0,0,0};
+    const unsigned int transparent_ind = nearest_search(n, px_0, min_opaque_val, NULL);
 
-    float difference_tolerance[map->colors];
+    float *difference_tolerance;
+	unsigned int i, col, row;
+    bool fs_direction = true;
 
-    if (output_image_is_remapped) for(unsigned int i=0; i < map->colors; i++) {
+#ifdef _MSC_VER
+    /* Initialize Floyd-Steinberg error vectors. */
+    f_pixel *thiserr, *nexterr;
+#else
+    f_pixel *restrict thiserr, *restrict nexterr;
+#endif
+    to_f_set_gamma(input_image->gamma);
+
+	difference_tolerance = (float *) malloc(map->colors * sizeof(float));
+	if (difference_tolerance == NULL) {
+		return;
+	}
+    if (output_image_is_remapped) for(i=0; i < map->colors; i++) {
             difference_tolerance[i] = distance_from_closest_other_color(map,i) / 4.f; // half of squared distance
         }
 
-    /* Initialize Floyd-Steinberg error vectors. */
-    f_pixel *restrict thiserr, *restrict nexterr;
+
     thiserr = malloc((cols + 2) * sizeof(*thiserr));
     nexterr = malloc((cols + 2) * sizeof(*thiserr));
     srand(12345); /* deterministic dithering is better for comparing results */
 
-    for (unsigned int col = 0; col < cols + 2; ++col) {
+    for (col = 0; col < cols + 2; ++col) {
         const double rand_max = RAND_MAX;
         thiserr[col].r = ((double)rand() - rand_max/2.0)/rand_max/255.0;
         thiserr[col].g = ((double)rand() - rand_max/2.0)/rand_max/255.0;
@@ -781,17 +864,18 @@ static void remap_to_palette_floyd(png24_image *input_image, png8_image *output_
         thiserr[col].a = ((double)rand() - rand_max/2.0)/rand_max/255.0;
     }
 
-    bool fs_direction = true;
-    for (unsigned int row = 0; row < rows; ++row) {
+    for (row = 0; row < rows; ++row) {
+	    unsigned int col = (fs_direction) ? 0 : (cols - 1);
+		f_pixel *temperr;
+
         memset(nexterr, 0, (cols + 2) * sizeof(*nexterr));
-
-        unsigned int col = (fs_direction) ? 0 : (cols - 1);
-
         do {
             float dither_level = dither_map ? dither_map[row*cols + col] : 15.f/16.f;
             const f_pixel spx = get_dithered_pixel(dither_level, max_dither_error, thiserr[col + 1], to_f(input_pixels[row][col]));
-
             unsigned int ind;
+            register f_pixel xp;
+			register f_pixel err;
+			register float colorimp;
             if (spx.a < 1.0/256.0) {
                 ind = transparent_ind;
             } else {
@@ -805,13 +889,12 @@ static void remap_to_palette_floyd(png24_image *input_image, png8_image *output_
 
             remapped[row*cols + col] = ind;
 
-            const f_pixel xp = acolormap[ind].acolor;
-            f_pixel err = {
-                .r = (spx.r - xp.r),
-                .g = (spx.g - xp.g),
-                .b = (spx.b - xp.b),
-                .a = (spx.a - xp.a),
-            };
+			xp = acolormap[ind].acolor;
+
+            err.r = (spx.r - xp.r);
+            err.g = (spx.g - xp.g);
+            err.b = (spx.b - xp.b);
+            err.a = (spx.a - xp.a);
 
             // If dithering error is crazy high, don't propagate it that much
             // This prevents crazy geen pixels popping out of the blue (or red or black! ;)
@@ -819,7 +902,7 @@ static void remap_to_palette_floyd(png24_image *input_image, png8_image *output_
                 dither_level *= 0.75;
             }
 
-            const float colorimp = (3.0f + acolormap[ind].acolor.a)/4.0f * dither_level;
+            colorimp = (3.0f + acolormap[ind].acolor.a)/4.0f * dither_level;
             err.r *= colorimp;
             err.g *= colorimp;
             err.b *= colorimp;
@@ -879,12 +962,12 @@ static void remap_to_palette_floyd(png24_image *input_image, png8_image *output_
         }
         while(1);
 
-        f_pixel *const temperr = thiserr;
+        temperr = thiserr;
         thiserr = nexterr;
         nexterr = temperr;
         fs_direction = !fs_direction;
     }
-
+	free(difference_tolerance);
     free(thiserr);
     free(nexterr);
     nearest_free(n);
@@ -928,6 +1011,8 @@ static void set_binary_mode(FILE *fp)
 static pngquant_error write_image(png8_image *output_image, png24_image *output_image24, const char *outname, struct pngquant_options *options)
 {
     FILE *outfile;
+	pngquant_error retval;
+
     if (options->using_stdin) {
         set_binary_mode(stdout);
         outfile = stdout;
@@ -938,13 +1023,13 @@ static pngquant_error write_image(png8_image *output_image, png24_image *output_
             verbose_print(options, "  writing truecolor image to stdout");
         }
     } else {
+        const char *outfilename = strrchr(outname, '/');
 
         if ((outfile = fopen(outname, "wb")) == NULL) {
             fprintf(stderr, "  error:  cannot open %s for writing\n", outname);
             return CANT_WRITE_ERROR;
         }
 
-        const char *outfilename = strrchr(outname, '/');
         if (outfilename) outfilename++; else outfilename = outname;
 
         if (output_image) {
@@ -954,7 +1039,7 @@ static pngquant_error write_image(png8_image *output_image, png24_image *output_
         }
     }
 
-    pngquant_error retval;
+
     #pragma omp critical (libpng)
     {
         if (output_image) {
@@ -980,6 +1065,9 @@ static histogram *get_histogram(pngquant_image *input_image, struct pngquant_opt
     unsigned int ignorebits=0;
     const rgb_pixel **input_pixels = (const rgb_pixel **)input_image->rwpng_image.row_pointers;
     const unsigned int cols = input_image->rwpng_image.width, rows = input_image->rwpng_image.height;
+    unsigned int maxcolors = (1<<17) + (1<<18)*(10-options->speed_tradeoff);
+	struct acolorhash_table *acht;
+	histogram *hist;
 
    /*
     ** Step 2: attempt to make a histogram of the colors, unclustered.
@@ -988,9 +1076,8 @@ static histogram *get_histogram(pngquant_image *input_image, struct pngquant_opt
     */
 
     if (options->speed_tradeoff > 7) ignorebits++;
-    unsigned int maxcolors = (1<<17) + (1<<18)*(10-options->speed_tradeoff);
 
-    struct acolorhash_table *acht = pam_allocacolorhash(maxcolors, rows*cols, ignorebits);
+    acht = pam_allocacolorhash(maxcolors, rows*cols, ignorebits);
     for (; ;) {
 
         // histogram uses noise contrast map for importance. Color accuracy in noisy areas is not very important.
@@ -1010,7 +1097,7 @@ static histogram *get_histogram(pngquant_image *input_image, struct pngquant_opt
         input_image->noise = NULL;
     }
 
-    histogram *hist = pam_acolorhashtoacolorhist(acht, input_image->rwpng_image.gamma);
+    hist = pam_acolorhashtoacolorhist(acht, input_image->rwpng_image.gamma);
     pam_freeacolorhash(acht);
 
     verbose_printf(options, "  made histogram...%d colors found", hist->size);
@@ -1026,14 +1113,16 @@ static void modify_alpha(png24_image *input_image, const float min_opaque_val)
     rgb_pixel *const *const input_pixels = (rgb_pixel **)input_image->row_pointers;
     const unsigned int rows = input_image->height, cols = input_image->width;
     const float gamma = input_image->gamma;
-    to_f_set_gamma(gamma);
 
     const float almost_opaque_val = min_opaque_val * 169.f/256.f;
     const unsigned int almost_opaque_val_int = almost_opaque_val*255.f;
+	unsigned int row;
 
+    to_f_set_gamma(gamma);
 
-    for(unsigned int row = 0; row < rows; ++row) {
-        for(unsigned int col = 0; col < cols; col++) {
+    for(row = 0; row < rows; ++row) {
+		unsigned int col;
+        for(col = 0; col < cols; col++) {
             const rgb_pixel srcpx = input_pixels[row][col];
 
             /* ie bug: to avoid visible step caused by forced opaqueness, linearily raise opaqueness of almost-opaque colors */
@@ -1052,6 +1141,7 @@ static void modify_alpha(png24_image *input_image, const float min_opaque_val)
 static pngquant_error read_image(const char *filename, int using_stdin, png24_image *input_image_p)
 {
     FILE *infile;
+    pngquant_error retval;
 
     if (using_stdin) {
         set_binary_mode(stdin);
@@ -1061,7 +1151,6 @@ static pngquant_error read_image(const char *filename, int using_stdin, png24_im
         return READ_ERROR;
     }
 
-    pngquant_error retval;
     #pragma omp critical (libpng)
     {
             retval = rwpng_read_image24(infile, input_image_p);
@@ -1085,37 +1174,49 @@ static pngquant_error read_image(const char *filename, int using_stdin, png24_im
  */
 static void contrast_maps(const rgb_pixel*const apixels[], const unsigned int cols, const unsigned int rows, const double gamma, float **noiseP, float **edgesP)
 {
+#ifdef _MSC_VER
+    float *noise = malloc(sizeof(float)*cols*rows);
+    float *tmp = malloc(sizeof(float)*cols*rows);
+    float *edges = malloc(sizeof(float)*cols*rows);
+#else
     float *restrict noise = malloc(sizeof(float)*cols*rows);
     float *restrict tmp = malloc(sizeof(float)*cols*rows);
     float *restrict edges = malloc(sizeof(float)*cols*rows);
-
+#endif
+	unsigned int i, j;
     to_f_set_gamma(gamma);
 
-    for (unsigned int j=0; j < rows; j++) {
+    for (j=0; j < rows; j++) {
         f_pixel prev, curr = to_f(apixels[j][0]), next=curr;
-        for (unsigned int i=0; i < cols; i++) {
+
+        for (i=0; i < cols; i++) {
+			register float a, r, g, b, horiz, vert, edge, z;
+			register float a1, r1, g1, b1;
+			register f_pixel prevl, nextl;
+
             prev=curr;
             curr=next;
+
             next = to_f(apixels[j][MIN(cols-1,i+1)]);
 
             // contrast is difference between pixels neighbouring horizontally and vertically
-            const float a = fabsf(prev.a+next.a - curr.a*2.f),
-            r = fabsf(prev.r+next.r - curr.r*2.f),
-            g = fabsf(prev.g+next.g - curr.g*2.f),
+            a = fabsf(prev.a+next.a - curr.a*2.f);
+            r = fabsf(prev.r+next.r - curr.r*2.f);
+            g = fabsf(prev.g+next.g - curr.g*2.f);
             b = fabsf(prev.b+next.b - curr.b*2.f);
 
-            const f_pixel prevl = to_f(apixels[MIN(rows-1,j+1)][i]);
-            const f_pixel nextl = to_f(apixels[j > 1 ? j-1 : 0][i]);
+            prevl = to_f(apixels[MIN(rows-1,j+1)][i]);
+            nextl = to_f(apixels[j > 1 ? j-1 : 0][i]);
 
-            const float a1 = fabsf(prevl.a+nextl.a - curr.a*2.f),
+            a1 = fabsf(prevl.a+nextl.a - curr.a*2.f),
             r1 = fabsf(prevl.r+nextl.r - curr.r*2.f),
             g1 = fabsf(prevl.g+nextl.g - curr.g*2.f),
             b1 = fabsf(prevl.b+nextl.b - curr.b*2.f);
 
-            const float horiz = MAX(MAX(a,r),MAX(g,b));
-            const float vert = MAX(MAX(a1,r1),MAX(g1,b1));
-            const float edge = MAX(horiz,vert);
-            float z = edge - fabsf(horiz-vert)*.5f;
+            horiz = MAX(MAX(a,r),MAX(g,b));
+            vert = MAX(MAX(a1,r1),MAX(g1,b1));
+            edge = MAX(horiz,vert);
+            z = edge - fabsf(horiz-vert)*.5f;
             z = 1.f - MAX(z,MIN(horiz,vert));
             z *= z; // noise is amplified
             z *= z;
@@ -1139,7 +1240,7 @@ static void contrast_maps(const rgb_pixel*const apixels[], const unsigned int co
 
     min3(edges, tmp, cols, rows);
     max3(tmp, edges, cols, rows);
-    for(unsigned int i=0; i < cols*rows; i++) edges[i] = MIN(noise[i], edges[i]);
+    for(i=0; i < cols*rows; i++) edges[i] = MIN(noise[i], edges[i]);
 
     free(tmp);
 
@@ -1158,13 +1259,19 @@ static void update_dither_map(const png8_image *output_image, float *edges)
 {
     const unsigned int width = output_image->width;
     const unsigned int height = output_image->height;
-    const unsigned char *restrict pixels = output_image->indexed_data;
+#ifdef _MSC_VER
+    const unsigned char *pixels = output_image->indexed_data;
+#else
+    const unsigned char *pixels = output_image->indexed_data;
+#endif
+	unsigned int row;
 
-    for(unsigned int row=0; row < height; row++) {
+    for(row=0; row < height; row++) {
         unsigned char lastpixel = pixels[row*width];
         unsigned int lastcol=0;
+		unsigned int col;
 
-        for(unsigned int col=1; col < width; col++) {
+        for(col=1; col < width; col++) {
             const unsigned char px = pixels[row*width + col];
 
             if (px != lastpixel || col == width-1) {
@@ -1211,6 +1318,9 @@ static colormap *find_best_palette(histogram *hist, unsigned int reqcolors, int 
     const double percent = (double)(feedback_loop_trials>0?feedback_loop_trials:1)/100.0;
 
     do {
+		bool first_run_of_target_mse;
+		double total_error;
+		
         colormap *newmap = mediancut(hist, options->min_opaque_val, reqcolors, target_mse * target_mse_overshoot, MAX(MAX(90.0/65536.0, target_mse), least_error)*1.2);
 
         if (feedback_loop_trials <= 0) {
@@ -1221,8 +1331,8 @@ static colormap *find_best_palette(histogram *hist, unsigned int reqcolors, int 
         // at the same time Voronoi iteration is done to improve the palette
         // and histogram weights are adjusted based on remapping error to give more weight to poorly matched colors
 
-        const bool first_run_of_target_mse = !acolormap && target_mse > 0;
-        double total_error = viter_do_iteration(hist, newmap, options->min_opaque_val, first_run_of_target_mse ? NULL : adjust_histogram_callback);
+        first_run_of_target_mse = !acolormap && target_mse > 0;
+        total_error = viter_do_iteration(hist, newmap, options->min_opaque_val, first_run_of_target_mse ? NULL : adjust_histogram_callback);
 
         // goal is to increase quality or to reduce number of colors used if quality is good enough
         if (!acolormap || total_error < least_error || (total_error <= target_mse && newmap->colors < reqcolors)) {
@@ -1243,7 +1353,8 @@ static colormap *find_best_palette(histogram *hist, unsigned int reqcolors, int 
 
             feedback_loop_trials -= 1; // asymptotic improvement could make it go on forever
         } else {
-            for(unsigned int j=0; j < hist->size; j++) {
+			unsigned int j;
+            for(j=0; j < hist->size; j++) {
                 hist->achv[j].adjusted_weight = (hist->achv[j].perceptual_weight + hist->achv[j].adjusted_weight)/2.0;
             }
 
@@ -1279,12 +1390,16 @@ static void prepare_image(pngquant_image *input_image, struct pngquant_options *
 static colormap *pngquant_quantize(histogram *hist, const struct pngquant_options *options)
 {
     const double max_mse = options->max_mse;
+	double palette_error = -1;
+    colormap *acolormap;
+	unsigned int iterations;
 
     // If image has few colors to begin with (and no quality degradation is required)
     // then it's possible to skip quantization entirely
     if (hist->size <= options->reqcolors && options->target_mse == 0) {
+		unsigned int i;
         colormap *hist_palette = pam_colormap(hist->size);
-        for(unsigned int i=0; i < hist->size; i++) {
+        for(i=0; i < hist->size; i++) {
             hist_palette->palette[i].acolor = hist->achv[i].acolor;
             hist_palette->palette[i].popularity = hist->achv[i].perceptual_weight;
         }
@@ -1294,19 +1409,20 @@ static colormap *pngquant_quantize(histogram *hist, const struct pngquant_option
         return hist_palette;
     }
 
-    double palette_error = -1;
-    colormap *acolormap = find_best_palette(hist, options->reqcolors, 56-9*options->speed_tradeoff, options, &palette_error);
+    acolormap = find_best_palette(hist, options->reqcolors, 56-9*options->speed_tradeoff, options, &palette_error);
 
     // Voronoi iteration approaches local minimum for the palette
-    unsigned int iterations = MAX(8-options->speed_tradeoff,0); iterations += iterations * iterations/2;
+    iterations = MAX(8-options->speed_tradeoff,0); iterations += iterations * iterations/2;
     if (!iterations && palette_error < 0 && max_mse < MAX_DIFF) iterations = 1; // otherwise total error is never calculated and MSE limit won't work
 
     if (iterations) {
-        verbose_print(options, "  moving colormap towards local minimum");
-
         const double iteration_limit = 1.0/(double)(1<<(23-options->speed_tradeoff));
         double previous_palette_error = MAX_DIFF;
-        for(unsigned int i=0; i < iterations; i++) {
+		unsigned int i;
+
+		verbose_print(options, "  moving colormap towards local minimum");
+
+        for(i=0; i < iterations; i++) {
             palette_error = viter_do_iteration(hist, acolormap, options->min_opaque_val, NULL);
 
             if (fabs(previous_palette_error-palette_error) < iteration_limit) {
@@ -1337,6 +1453,9 @@ static colormap *pngquant_quantize(histogram *hist, const struct pngquant_option
 static pngquant_error pngquant_remap(colormap *acolormap, pngquant_image *input_image, png8_image *output_image, const struct pngquant_options *options)
 {
     double palette_error = acolormap->palette_error;
+	unsigned int i;
+	const bool floyd = options->floyd;
+    const bool use_dither_map = floyd && input_image->edges && options->speed_tradeoff < 6;
 
     output_image->width = input_image->rwpng_image.width;
     output_image->height = input_image->rwpng_image.height;
@@ -1355,7 +1474,7 @@ static pngquant_error pngquant_remap(colormap *acolormap, pngquant_image *input_
     // tRNS, etc.
     output_image->num_palette = acolormap->colors;
     output_image->num_trans = 0;
-    for(unsigned int i=0; i < acolormap->colors; i++) {
+    for(i=0; i < acolormap->colors; i++) {
         if (acolormap->palette[i].acolor.a < 255.0/256.0) {
             output_image->num_trans = i+1;
         }
@@ -1365,10 +1484,6 @@ static pngquant_error pngquant_remap(colormap *acolormap, pngquant_image *input_
      ** Step 4: map the colors in the image to their closest match in the
      ** new colormap, and write 'em out.
      */
-
-    const bool floyd = options->floyd,
-              use_dither_map = floyd && input_image->edges && options->speed_tradeoff < 6;
-
     if (!floyd || use_dither_map) {
         // If no dithering is required, that's the final remapping.
         // If dithering (with dither map) is required, this image is used to find areas that require dithering

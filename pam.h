@@ -16,7 +16,15 @@
 
 #include <math.h>
 #include <assert.h>
-#include <stdbool.h>
+#ifdef _MSC_VER
+#define inline __inline
+# define bool  unsigned char
+# define true  1
+# define false 0
+#else
+# include <stdbool.h>
+#endif
+
 
 #ifndef MAX
 #  define MAX(a,b)  ((a) > (b)? (a) : (b))
@@ -69,46 +77,47 @@ void to_f_set_gamma(double gamma);
  Converts 8-bit color to internal gamma and premultiplied alpha.
  (premultiplied color space is much better for blending of semitransparent colors)
  */
-inline static f_pixel to_f(rgb_pixel px) ALWAYS_INLINE;
-inline static f_pixel to_f(rgb_pixel px)
+inline static f_pixel to_f(const rgb_pixel px) ALWAYS_INLINE;
+inline static f_pixel to_f(const rgb_pixel px)
 {
-    float a = px.a/255.f;
-
-    return (f_pixel) {
-        .a = a,
-        .r = gamma_lut[px.r]*a,
-        .g = gamma_lut[px.g]*a,
-        .b = gamma_lut[px.b]*a,
-    };
+    const float a = px.a/255.f;
+	const f_pixel pxl = {
+	/* a */ a,
+	/* r */ gamma_lut[px.r]*a,
+	/* g */ gamma_lut[px.g]*a,
+	/* b */ gamma_lut[px.b]*a
+	};
+	return pxl;
 }
 
-inline static rgb_pixel to_rgb(float gamma, f_pixel px)
+inline static rgb_pixel to_rgb(const float gamma, const f_pixel px)
 {
     if (px.a < 1.f/256.f) {
-        return (rgb_pixel){0,0,0,0};
-    }
+		const rgb_pixel pxl_ret = {0,0,0,0};
+        return pxl_ret;
+    } else {
+		register float r = px.r / px.a,
+			  g = px.g / px.a,
+			  b = px.b / px.a,
+			  a = px.a;
+		rgb_pixel pxl_ret;
 
-    float r = px.r / px.a,
-          g = px.g / px.a,
-          b = px.b / px.a,
-          a = px.a;
+		r = powf(r, gamma/internal_gamma);
+		g = powf(g, gamma/internal_gamma);
+		b = powf(b, gamma/internal_gamma);
 
-    r = powf(r, gamma/internal_gamma);
-    g = powf(g, gamma/internal_gamma);
-    b = powf(b, gamma/internal_gamma);
+		// 256, because numbers are in range 1..255.9999… rounded down
+		r *= 256.f;
+		g *= 256.f;
+		b *= 256.f;
+		a *= 256.f;
 
-    // 256, because numbers are in range 1..255.9999… rounded down
-    r *= 256.f;
-    g *= 256.f;
-    b *= 256.f;
-    a *= 256.f;
-
-    return (rgb_pixel){
-        .r = r>=255.f ? 255 : r,
-        .g = g>=255.f ? 255 : g,
-        .b = b>=255.f ? 255 : b,
-        .a = a>=255.f ? 255 : a,
-    };
+		pxl_ret.r = r >= 255.f ? 255 : (unsigned char)r;
+		pxl_ret.g = g >= 255.f ? 255 : (unsigned char)g;
+		pxl_ret.b = b >= 255.f ? 255 : (unsigned char)b;
+		pxl_ret.a = a >= 255.f ? 255 : (unsigned char)a;
+		return pxl_ret;
+	}
 }
 
 inline static double colordifference_ch(const double x, const double y, const double alphas) ALWAYS_INLINE;
@@ -124,9 +133,9 @@ inline static float colordifference_stdc(const f_pixel px, const f_pixel py) ALW
 inline static float colordifference_stdc(const f_pixel px, const f_pixel py)
 {
     const double alphas = py.a-px.a;
-    return colordifference_ch(px.r, py.r, alphas) +
+    return (float) (colordifference_ch(px.r, py.r, alphas) +
            colordifference_ch(px.g, py.g, alphas) +
-           colordifference_ch(px.b, py.b, alphas);
+           colordifference_ch(px.b, py.b, alphas));
 }
 
 inline static double min_colordifference_ch(const double x, const double y, const double alphas) ALWAYS_INLINE;
@@ -141,9 +150,9 @@ inline static float min_colordifference(const f_pixel px, const f_pixel py) ALWA
 inline static float min_colordifference(const f_pixel px, const f_pixel py)
 {
     const double alphas = py.a-px.a;
-    return min_colordifference_ch(px.r, py.r, alphas) +
+    return (float) (min_colordifference_ch(px.r, py.r, alphas) +
            min_colordifference_ch(px.g, py.g, alphas) +
-           min_colordifference_ch(px.b, py.b, alphas);
+           min_colordifference_ch(px.b, py.b, alphas));
 }
 
 inline static float colordifference(f_pixel px, f_pixel py) ALWAYS_INLINE;

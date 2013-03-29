@@ -5,7 +5,11 @@
 /*
  Blurs image horizontally (width 2*size+1) and writes it transposed to dst (called twice gives 2d blur)
  */
+#ifdef _MSC_VER
+static void transposing_1d_blur(float *src, float *dst, unsigned int width, unsigned int height, const unsigned int size)
+#else
 static void transposing_1d_blur(float *restrict src, float *restrict dst, unsigned int width, unsigned int height, const unsigned int size)
+#endif
 {
     const float sizef = size;
 
