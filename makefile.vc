@@ -1,0 +1,52 @@
+
+!IF [@getversion.bat]
+!ERROR Cannot fetch version info
+!ENDIF
+
+!include version_info.vc
+
+!IFNDEF WITH_DEVEL
+WITH_DEVEL          = ../deps
+!ENDIF
+DEVEL_INCLUDE  = $(WITH_DEVEL)/include
+DEVEL_LIB      = $(WITH_DEVEL)/lib
+DEVEL_BIN      = $(WITH_DEVEL)/bin
+
+CC_NODEBUG  = cl.exe
+CC_DEBUG    = cl.exe /Od /D_DEBUG /RTC1 /Z7 /LDd /W3
+CFLAGS      = /I. /DWIN32 /nologo /W3 /EHsc /DWIN32
+DIR_BIN = ..\bin
+DIR_BIN_X86 = $(DIR_BIN)\x86
+DIR_BIN_X64 = $(DIR_BIN)\x64
+
+DIR_INTERMEDIATE = ..\objs
+DIR_INTERMEDIATE_X86 = $(DIR_INTERMEDIATE)\x86
+DIR_INTERMEDIATE_X64 = $(DIR_INTERMEDIATE)\x64
+
+BIN=pngquant
+
+CFLAGS         = $(CFLAGS) /DWIN32 /I"$(DEVEL_INCLUDE)" /I"$(DEVEL_INCLUDE)/libpng15" /D_CRT_SECURE_NO_WARNINGS
+LFLAGS         = $(LFLAGS) "/LIBPATH:$(DEVEL_LIB)"
+
+SRC_FILES = getopt_long.c\
+	pngquant.c\
+	rwpng.c\
+	pam.c\
+	mediancut.c\
+	blur.c\
+	mempool.c\
+	viter.c\
+	nearest.c
+
+SRC_FILES = getopt.c\
+	pngquant.c\
+
+all: init $(BIN)
+	@echo building version $(VERSION)
+
+$(BIN): $(SRC_FILES)
+	$(CC_NODEBUG) $(CFLAGS) $(LFLAGS) /lib:libpng_a.lib $(SRC_FILES)
+
+init:
+	@if not exist $(DIR_BIN_X86) mkdir $(DIR_BIN_X86)
+	@if not exist $(DIR_INTERMEDIATE_X86) mkdir $(DIR_INTERMEDIATE_X86)
