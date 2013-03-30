@@ -54,9 +54,12 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
         float boost=1.0;
         for(col = 0; col < cols; ++col) {
             // RGBA color is casted to long for easier hasing/comparisons
-            union rgba_as_int px = {apixels[row][col]};
+            union rgba_as_int px;
             unsigned int hash;
 			struct acolorhist_arr_head *achl;
+
+			px.rgb =apixels[row][col];
+
             if (importance_map) {
                 boost = 0.5f+*importance_map++;
             }
@@ -82,7 +85,12 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
             if (achl->used) {
                 if (achl->used > 1) {
 					struct acolorhist_arr_item *other_items;
+                    struct acolorhist_arr_item *new_items;
+					struct acolorhist_arr_item new_item;
+					register int mempool_size;
+                    unsigned int capacity;
 					unsigned int i;
+
                     if (achl->inline2.color.l == px.l) {
                         achl->inline2.perceptual_weight += boost;
                         continue;
@@ -98,10 +106,16 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
 
                     // the array was allocated with spare items
                     if (i < achl->capacity) {
+						struct acolorhist_arr_item pxl_item;
+						pxl_item.color = px;
+						pxl_item.perceptual_weight = boost;
+
+/*
                         other_items[i] = (struct acolorhist_arr_item){
                             .color = px,
                             .perceptual_weight = boost,
                         };
+*/
                         achl->used++;
                         ++colors;
                         continue;
@@ -113,13 +127,11 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
                         return false;
                     }
 
-                    struct acolorhist_arr_item *new_items;
-                    unsigned int capacity;
                     if (!other_items) { // there was no array previously, alloc "small" array
                         capacity = 8;
                         if (freestackp <= 0) {
                             // estimate how many colors are going to be + headroom
-                            const int mempool_size = ((rows-row) * 2 * colors / (1+row) + 1024) * sizeof(struct acolorhist_arr_item);
+                            mempool_size = ((rows-row) * 2 * colors / (1+row) + 1024) * sizeof(struct acolorhist_arr_item);
                             new_items = mempool_new(&acht->mempool, sizeof(struct acolorhist_arr_item)*capacity, mempool_size);
                         } else {
                             // freestack stores previously freed (reallocated) arrays that can be reused
@@ -128,21 +140,28 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
                         }
                     } else {
                         // simply reallocs and copies array to larger capacity
-                        capacity = achl->capacity*2 + 16;
+                        const capacity = achl->capacity*2 + 16;
+                        const int mempool_size = ((rows-row) * 2 * colors / (1+row) + 32*capacity) * sizeof(struct acolorhist_arr_item);
+
                         if (freestackp < stacksize-1) {
                             freestack[freestackp++] = other_items;
                         }
-                        const int mempool_size = ((rows-row) * 2 * colors / (1+row) + 32*capacity) * sizeof(struct acolorhist_arr_item);
+
                         new_items = mempool_new(&acht->mempool, sizeof(struct acolorhist_arr_item)*capacity, mempool_size);
                         memcpy(new_items, other_items, sizeof(other_items[0])*achl->capacity);
                     }
 
                     achl->other_items = new_items;
                     achl->capacity = capacity;
+                    new_item.color = px;
+					new_item.perceptual_weight = boost;
+
+/*
                     new_items[i] = (struct acolorhist_arr_item){
                         .color = px,
                         .perceptual_weight = boost,
                     };
+*/
                     achl->used++;
                 } else {
                     // these are elses for first checks whether first and second inline-stored colors are used
@@ -194,15 +213,17 @@ histogram *pam_acolorhashtoacolorhist(const struct acolorhash_table *acht, const
 {
     histogram *hist = malloc(sizeof(hist[0]));
 	unsigned int j;
+	unsigned int i;
+    double total_weight=0;
 
     hist->achv = malloc(acht->colors * sizeof(hist->achv[0]));
     hist->size = acht->colors;
 
     to_f_set_gamma(gamma);
 
-    double total_weight=0;
+
     for(j=0, i=0; i < acht->hash_size; ++i) {
-		unsigned int i;
+
         const struct acolorhist_arr_head *const achl = &acht->buckets[i];
         if (achl->used) {
             PAM_ADD_TO_HIST(achl->inline1);
@@ -251,7 +272,8 @@ void pam_freecolormap(colormap *c)
 
 void to_f_set_gamma(double gamma)
 {
-    for(int i=0; i < 256; i++) {
+	unsigned int i;
+    for(i=0; i < 256; i++) {
         gamma_lut[i] = pow((double)i/255.0, internal_gamma/gamma);
     }
 }
