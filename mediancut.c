@@ -21,7 +21,7 @@
 
 #define index_of_channel(ch) (offsetof(f_pixel,ch)/sizeof(float))
 
-static f_pixel averagepixels(unsigned int clrs, const hist_item achv[static clrs], float min_opaque_val);
+static f_pixel averagepixels(unsigned int clrs, const hist_item *achv, float min_opaque_val);
 
 struct box {
     f_pixel color;
@@ -42,32 +42,35 @@ inline static double variance_diff(double val, const double good_enough)
 /** Weighted per-channel variance of the box. It's used to decide which channel to split by */
 static f_pixel box_variance(const hist_item achv[], const struct box *box)
 {
-    f_pixel mean = box->color;
-    double variancea=0, variancer=0, varianceg=0, varianceb=0;
+    const f_pixel mean = box->color;
+    register double variancea=0, variancer=0, varianceg=0, varianceb=0;
+	f_pixel px_ret;
+	unsigned int i;
 
-    for(unsigned int i = 0; i < box->colors; ++i) {
+    for(i = 0; i < box->colors; ++i) {
         f_pixel px = achv[box->ind + i].acolor;
-        double weight = achv[box->ind + i].adjusted_weight;
+        const double weight = achv[box->ind + i].adjusted_weight;
         variancea += variance_diff(mean.a - px.a, 2.0/256.0)*weight;
         variancer += variance_diff(mean.r - px.r, 1.0/256.0)*weight;
         varianceg += variance_diff(mean.g - px.g, 1.0/256.0)*weight;
         varianceb += variance_diff(mean.b - px.b, 1.0/256.0)*weight;
     }
 
-    return (f_pixel){
-        .a = variancea*(4.0/16.0),
-        .r = variancer*(7.0/16.0),
-        .g = varianceg*(9.0/16.0),
-        .b = varianceb*(5.0/16.0),
-    };
+	px_ret.a = variancea*(4.0/16.0);
+	px_ret.r = variancer*(7.0/16.0);
+	px_ret.g = varianceg*(9.0/16.0);
+	px_ret.b = varianceb*(5.0/16.0);
+
+    return px_ret;
 }
 
 static double box_max_error(const hist_item achv[], const struct box *box)
 {
     f_pixel mean = box->color;
     double max_error = 0;
+	unsigned int i;
 
-    for(unsigned int i = 0; i < box->colors; ++i) {
+    for(i = 0; i < box->colors; ++i) {
         const double diff = colordifference(mean, achv[box->ind + i].acolor);
         if (diff > max_error) {
             max_error = diff;
@@ -90,23 +93,26 @@ static inline void hist_item_swap(hist_item *l, hist_item *r)
 inline static unsigned int qsort_pivot(const hist_item *const base, const unsigned int len) ALWAYS_INLINE;
 inline static unsigned int qsort_pivot(const hist_item *const base, const unsigned int len)
 {
-    if (len < 32) return len/2;
-
-    const unsigned int aidx=8, bidx=len/2, cidx=len-1;
-    const unsigned int a=base[aidx].sort_value, b=base[bidx].sort_value, c=base[cidx].sort_value;
-    return (a < b) ? ((b < c) ? bidx : ((a < c) ? cidx : aidx ))
-                   : ((b > c) ? bidx : ((a < c) ? aidx : cidx ));
+    if (len < 32) {
+		return len/2;
+	} else {
+		const unsigned int aidx=8, bidx=len/2, cidx=len-1;
+		const unsigned int a=base[aidx].sort_value, b=base[bidx].sort_value, c=base[cidx].sort_value;
+		return (a < b) ? ((b < c) ? bidx : ((a < c) ? cidx : aidx ))
+					   : ((b > c) ? bidx : ((a < c) ? aidx : cidx ));
+	}
 }
 
 inline static unsigned int qsort_partition(hist_item *const base, const unsigned int len) ALWAYS_INLINE;
 inline static unsigned int qsort_partition(hist_item *const base, const unsigned int len)
 {
     unsigned int l = 1, r = len;
+	register unsigned int pivot_value;
     if (len >= 8) {
         hist_item_swap(&base[0], &base[qsort_pivot(base,len)]);
     }
 
-    const unsigned int pivot_value = base[0].sort_value;
+    pivot_value = base[0].sort_value;
     while (l < r) {
         if (base[l].sort_value >= pivot_value) {
             l++;
@@ -184,6 +190,11 @@ static int comparevariance(const void *ch1, const void *ch2)
 /** Finds which channels need to be sorted first and preproceses achv for fast sort */
 static double prepare_sort(struct box *b, hist_item achv[])
 {
+	unsigned int i, j;
+	double totalvar = 0;
+	unsigned int ind, end;
+	register f_pixel median;
+
     /*
      ** Sort dimensions by their variance, and then sort colors first by dimension with highest variance
      */
@@ -196,7 +207,7 @@ static double prepare_sort(struct box *b, hist_item achv[])
 
     qsort(channels, 4, sizeof(channels[0]), comparevariance);
 
-    for(unsigned int i=0; i < b->colors; i++) {
+    for(i=0; i < b->colors; i++) {
         const float *chans = (const float *)&achv[b->ind + i].acolor;
         // Only the first channel really matters. When trying median cut many times
         // with different histogram weights, I don't want sort randomness to influence outcome.
@@ -204,12 +215,12 @@ static double prepare_sort(struct box *b, hist_item achv[])
                                        (unsigned int)((chans[channels[2].chan] + chans[channels[1].chan]/2.0 + chans[channels[3].chan]/4.0)*65535.0);
     }
 
-    const f_pixel median = get_median(b, achv);
+    median = get_median(b, achv);
 
     // box will be split to make color_weight of each side even
-    const unsigned int ind = b->ind, end = ind+b->colors;
-    double totalvar = 0;
-    for(unsigned int j=ind; j < end; j++) totalvar += (achv[j].color_weight = color_weight(median, achv[j]));
+    ind = b->ind; end = ind+b->colors;
+
+    for(j=ind; j < end; j++) totalvar += (achv[j].color_weight = color_weight(median, achv[j]));
     return totalvar / 2.0;
 }
 
@@ -233,12 +244,13 @@ static f_pixel get_median(const struct box *b, hist_item achv[])
 static int best_splittable_box(struct box* bv, unsigned int boxes, const double max_mse)
 {
     int bi=-1; double maxsum=0;
-    for(unsigned int i=0; i < boxes; i++) {
-        if (bv[i].colors < 2) continue;
-
+	unsigned int i;
+    for(i=0; i < boxes; i++) {
         // looks only at max variance, because it's only going to split by it
         const double cv = MAX(bv[i].variance.r, MAX(bv[i].variance.g,bv[i].variance.b));
         double thissum = bv[i].sum * MAX(bv[i].variance.a, cv);
+
+        if (bv[i].colors < 2) continue;
 
         if (bv[i].max_error > max_mse) {
             thissum = thissum* bv[i].max_error/max_mse;
@@ -266,9 +278,10 @@ static void adjust_histogram(hist_item *achv, const colormap *map, const struct 
 double box_error(const struct box *box, const hist_item achv[])
 {
     f_pixel avg = box->color;
-
+	unsigned int i;
     double total_error=0;
-    for (unsigned int i = 0; i < box->colors; ++i) {
+
+    for (i = 0; i < box->colors; ++i) {
         total_error += colordifference(avg, achv[box->ind + i].acolor) * achv[box->ind + i].perceptual_weight;
     }
 
@@ -278,10 +291,11 @@ double box_error(const struct box *box, const hist_item achv[])
 
 static bool total_box_error_below_target(double target_mse, struct box bv[], unsigned int boxes, const histogram *hist)
 {
-    target_mse *= hist->total_perceptual_weight;
     double total_error=0;
+	unsigned int i;
+    target_mse *= hist->total_perceptual_weight;
 
-    for(unsigned int i=0; i < boxes; i++) {
+    for(i=0; i < boxes; i++) {
         // error is (re)calculated lazily
         if (bv[i].total_error >= 0) {
             total_error += bv[i].total_error;
@@ -289,7 +303,7 @@ static bool total_box_error_below_target(double target_mse, struct box bv[], uns
         if (total_error > target_mse) return false;
     }
 
-    for(unsigned int i=0; i < boxes; i++) {
+    for(i=0; i < boxes; i++) {
         if (bv[i].total_error < 0) {
             bv[i].total_error = box_error(&bv[i], hist->achv);
             total_error += bv[i].total_error;
@@ -305,10 +319,12 @@ static bool total_box_error_below_target(double target_mse, struct box bv[], uns
  ** on Paul Heckbert's paper, "Color Image Quantization for Frame Buffer
  ** Display," SIGGRAPH 1982 Proceedings, page 297.
  */
-colormap *mediancut(histogram *hist, const float min_opaque_val, unsigned int newcolors, const double target_mse, const double max_mse)
+colormap *mediancut(histogram *hist, const float min_opaque_val, const unsigned int newcolors, const double target_mse, const double max_mse)
 {
     hist_item *achv = hist->achv;
     struct box bv[newcolors];
+	unsigned int i;
+    unsigned int boxes = 1;
 
     /*
      ** Set up the initial box.
@@ -320,9 +336,7 @@ colormap *mediancut(histogram *hist, const float min_opaque_val, unsigned int ne
     bv[0].max_error = box_max_error(achv, &bv[0]);
     bv[0].sum = 0;
     bv[0].total_error = -1;
-    for(unsigned int i=0; i < bv[0].colors; i++) bv[0].sum += achv[i].adjusted_weight;
-
-    unsigned int boxes = 1;
+    for(i=0; i < bv[0].colors; i++) bv[0].sum += achv[i].adjusted_weight;
 
     // remember smaller palette for fast searching
     colormap *representative_subset = NULL;
@@ -371,7 +385,9 @@ colormap *mediancut(histogram *hist, const float min_opaque_val, unsigned int ne
          */
         double sm = bv[bi].sum;
         double lowersum = 0;
-        for(unsigned int i=0; i < break_at; i++) lowersum += achv[indx + i].adjusted_weight;
+		unsigned int i;
+
+        for(i=0; i < break_at; i++) lowersum += achv[indx + i].adjusted_weight;
 
         bv[bi].colors = break_at;
         bv[bi].sum = lowersum;
@@ -412,13 +428,15 @@ static colormap *colormap_from_boxes(struct box* bv, unsigned int boxes, hist_it
      */
 
     colormap *map = pam_colormap(boxes);
+	unsigned int bi;
 
-    for(unsigned int bi = 0; bi < boxes; ++bi) {
+    for(bi = 0; bi < boxes; ++bi) {
+		unsigned int i;
         map->palette[bi].acolor = bv[bi].color;
 
         /* store total color popularity (perceptual_weight is approximation of it) */
         map->palette[bi].popularity = 0;
-        for(unsigned int i=bv[bi].ind; i < bv[bi].ind+bv[bi].colors; i++) {
+        for(i=bv[bi].ind; i < bv[bi].ind+bv[bi].colors; i++) {
             map->palette[bi].popularity += achv[i].perceptual_weight;
         }
     }
@@ -429,19 +447,22 @@ static colormap *colormap_from_boxes(struct box* bv, unsigned int boxes, hist_it
 /* increase histogram popularity by difference from the final color (this is used as part of feedback loop) */
 static void adjust_histogram(hist_item *achv, const colormap *map, const struct box* bv, unsigned int boxes)
 {
-    for(unsigned int bi = 0; bi < boxes; ++bi) {
-        for(unsigned int i=bv[bi].ind; i < bv[bi].ind+bv[bi].colors; i++) {
+	unsigned int bi;
+    for(bi = 0; bi < boxes; ++bi) {
+		unsigned int i;
+        for(i=bv[bi].ind; i < bv[bi].ind+bv[bi].colors; i++) {
             achv[i].adjusted_weight *= sqrt(1.0 +colordifference(map->palette[bi].acolor, achv[i].acolor)/4.0);
         }
     }
 }
 
-static f_pixel averagepixels(unsigned int clrs, const hist_item achv[static clrs], const float min_opaque_val)
+static f_pixel averagepixels(unsigned int clrs, const hist_item *achv, const float min_opaque_val)
 {
     double r = 0, g = 0, b = 0, a = 0, sum = 0;
     float maxa = 0;
+	unsigned int i;
 
-    for(unsigned int i = 0; i < clrs; ++i) {
+    for(i = 0; i < clrs; ++i) {
         const f_pixel px = achv[i].acolor;
         double tmp, weight = 1.0f;
 

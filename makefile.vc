@@ -41,7 +41,8 @@ SRC_FILES = getopt_long.c\
 SRC_FILES = getopt_long.c\
 	pngquant.c\
 	rwpng.c\
-	pam.c
+	pam.c\
+	mediancut.c
 
 all: init $(BIN)
 	@echo building version $(VERSION)
