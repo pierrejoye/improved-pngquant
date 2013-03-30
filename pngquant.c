@@ -1185,6 +1185,7 @@ static void contrast_maps(const rgb_pixel*const apixels[], const unsigned int co
 #endif
 	unsigned int i, j;
     to_f_set_gamma(gamma);
+	
 
     for (j=0; j < rows; j++) {
         f_pixel prev, curr = to_f(apixels[j][0]), next=curr;

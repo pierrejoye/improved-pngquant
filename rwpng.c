@@ -69,10 +69,12 @@ static void user_read_data(png_structp png_ptr, png_bytep data, png_size_t lengt
 
 static png_bytepp rwpng_create_row_pointers(png_infop info_ptr, png_structp png_ptr, unsigned char *base, unsigned int height, unsigned int rowbytes)
 {
+    png_bytepp row_pointers = malloc(height * sizeof(row_pointers[0]));
+	unsigned int row;
+
     if (!rowbytes) rowbytes = png_get_rowbytes(png_ptr, info_ptr);
 
-    png_bytepp row_pointers = malloc(height * sizeof(row_pointers[0]));
-    for(unsigned int row = 0;  row < height;  ++row) {
+    for(row = 0;  row < height;  ++row) {
         row_pointers[row] = base + row * rowbytes;
     }
     return row_pointers;
@@ -95,6 +97,9 @@ pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr
     png_infop    info_ptr = NULL;
     png_size_t   rowbytes;
     int          color_type, bit_depth;
+    struct rwpng_read_data read_data = {infile, 0};
+	png_bytepp row_pointers;
+    double gamma;
 
     png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, mainprog_ptr,
       rwpng_error_handler, NULL);
@@ -116,7 +121,6 @@ pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr
         return LIBPNG_FATAL_ERROR;   /* fatal libpng error (via longjmp()) */
     }
 
-    struct rwpng_read_data read_data = {infile, 0};
     png_set_read_fn(png_ptr, &read_data, user_read_data);
 
     png_read_info(png_ptr, info_ptr);  /* read all PNG info up to image data */
@@ -164,8 +168,6 @@ pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr
 
 
     /* get and save the gamma info (if any) for writing */
-
-    double gamma;
     mainprog_ptr->gamma = png_get_gAMA(png_ptr, info_ptr, &gamma) ? gamma : 0.45455;
 
     png_set_interlace_handling(png_ptr);
@@ -183,7 +185,7 @@ pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr
         return PNG_OUT_OF_MEMORY_ERROR;
     }
 
-    png_bytepp row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->rgba_data, mainprog_ptr->height, 0);
+    row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->rgba_data, mainprog_ptr->height, 0);
 
     /* now we can go ahead and just read the whole image */
 
@@ -276,8 +278,10 @@ pngquant_error rwpng_write_image8(FILE *outfile, png8_image *mainprog_ptr)
 {
     png_structp png_ptr;
     png_infop info_ptr;
-
+    int sample_depth;
     pngquant_error retval = rwpng_write_image_init((png_image*)mainprog_ptr, &png_ptr, &info_ptr, outfile);
+    png_bytepp row_pointers;
+
     if (retval) return retval;
 
     // Palette images generally don't gain anything from filtering
@@ -286,7 +290,6 @@ pngquant_error rwpng_write_image8(FILE *outfile, png8_image *mainprog_ptr)
     rwpng_set_gamma(info_ptr, png_ptr, mainprog_ptr->gamma);
 
     /* set the image parameters appropriately */
-    int sample_depth;
     if (mainprog_ptr->num_palette <= 2)
         sample_depth = 1;
     else if (mainprog_ptr->num_palette <= 4)
@@ -307,7 +310,7 @@ pngquant_error rwpng_write_image8(FILE *outfile, png8_image *mainprog_ptr)
         png_set_tRNS(png_ptr, info_ptr, mainprog_ptr->trans, mainprog_ptr->num_trans, NULL);
 
 
-    png_bytepp row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->indexed_data, mainprog_ptr->height, mainprog_ptr->width);
+    row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->indexed_data, mainprog_ptr->height, mainprog_ptr->width);
 
     rwpng_write_end(&info_ptr, &png_ptr, row_pointers);
 
@@ -320,8 +323,9 @@ pngquant_error rwpng_write_image24(FILE *outfile, png24_image *mainprog_ptr)
 {
     png_structp png_ptr;
     png_infop info_ptr;
-
+	png_bytepp row_pointers;
     pngquant_error retval = rwpng_write_image_init((png_image*)mainprog_ptr, &png_ptr, &info_ptr, outfile);
+
     if (retval) return retval;
 
     rwpng_set_gamma(info_ptr, png_ptr, mainprog_ptr->gamma);
@@ -332,7 +336,7 @@ pngquant_error rwpng_write_image24(FILE *outfile, png24_image *mainprog_ptr)
                  PNG_FILTER_TYPE_BASE);
 
 
-    png_bytepp row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->rgba_data, mainprog_ptr->height, 0);
+    row_pointers = rwpng_create_row_pointers(info_ptr, png_ptr, mainprog_ptr->rgba_data, mainprog_ptr->height, 0);
 
     rwpng_write_end(&info_ptr, &png_ptr, row_pointers);
 

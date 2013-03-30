@@ -47,19 +47,20 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
     const unsigned int stacksize = sizeof(acht->freestack)/sizeof(acht->freestack[0]);
     struct acolorhist_arr_item **freestack = acht->freestack;
     unsigned int freestackp=acht->freestackp;
-
+	unsigned int row;
     /* Go through the entire image, building a hash table of colors. */
-    for(unsigned int row = 0; row < rows; ++row) {
-
+    for(row = 0; row < rows; ++row) {
+		unsigned int col;
         float boost=1.0;
-        for(unsigned int col = 0; col < cols; ++col) {
+        for(col = 0; col < cols; ++col) {
+            // RGBA color is casted to long for easier hasing/comparisons
+            union rgba_as_int px = {apixels[row][col]};
+            unsigned int hash;
+			struct acolorhist_arr_head *achl;
             if (importance_map) {
                 boost = 0.5f+*importance_map++;
             }
 
-            // RGBA color is casted to long for easier hasing/comparisons
-            union rgba_as_int px = {apixels[row][col]};
-            unsigned int hash;
             if (!px.rgb.a) {
                 // "dirty alpha" has different RGBA values that end up being the same fully transparent color
                 px.l=0; hash=0;
@@ -73,21 +74,22 @@ bool pam_computeacolorhash(struct acolorhash_table *acht, const rgb_pixel*const*
             /* head of the hash function stores first 2 colors inline (achl->used = 1..2),
                to reduce number of allocations of achl->other_items.
              */
-            struct acolorhist_arr_head *achl = &buckets[hash];
+            achl = &buckets[hash];
             if (achl->inline1.color.l == px.l && achl->used) {
                 achl->inline1.perceptual_weight += boost;
                 continue;
             }
             if (achl->used) {
                 if (achl->used > 1) {
+					struct acolorhist_arr_item *other_items;
+					unsigned int i;
                     if (achl->inline2.color.l == px.l) {
                         achl->inline2.perceptual_weight += boost;
                         continue;
                     }
                     // other items are stored as an array (which gets reallocated if needed)
-                    struct acolorhist_arr_item *other_items = achl->other_items;
-                    unsigned int i = 0;
-                    for (; i < achl->used-2; i++) {
+                    other_items = achl->other_items;
+                    for (i=0; i < achl->used-2; i++) {
                         if (other_items[i].color.l == px.l) {
                             other_items[i].perceptual_weight += boost;
                             goto continue_outer_loop;
@@ -191,13 +193,16 @@ struct acolorhash_table *pam_allocacolorhash(unsigned int maxcolors, unsigned in
 histogram *pam_acolorhashtoacolorhist(const struct acolorhash_table *acht, const double gamma)
 {
     histogram *hist = malloc(sizeof(hist[0]));
+	unsigned int j;
+
     hist->achv = malloc(acht->colors * sizeof(hist->achv[0]));
     hist->size = acht->colors;
 
     to_f_set_gamma(gamma);
 
     double total_weight=0;
-    for(unsigned int j=0, i=0; i < acht->hash_size; ++i) {
+    for(j=0, i=0; i < acht->hash_size; ++i) {
+		unsigned int i;
         const struct acolorhist_arr_head *const achl = &acht->buckets[i];
         if (achl->used) {
             PAM_ADD_TO_HIST(achl->inline1);
@@ -205,7 +210,7 @@ histogram *pam_acolorhashtoacolorhist(const struct acolorhash_table *acht, const
             if (achl->used > 1) {
                 PAM_ADD_TO_HIST(achl->inline2);
 
-                for(unsigned int i=0; i < achl->used-2; i++) {
+                for(i=0; i < achl->used-2; i++) {
                     PAM_ADD_TO_HIST(achl->other_items[i]);
                 }
             }

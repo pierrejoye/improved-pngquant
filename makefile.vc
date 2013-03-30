@@ -23,29 +23,32 @@ DIR_INTERMEDIATE = ..\objs
 DIR_INTERMEDIATE_X86 = $(DIR_INTERMEDIATE)\x86
 DIR_INTERMEDIATE_X64 = $(DIR_INTERMEDIATE)\x64
 
-BIN=pngquant
+BIN=pngquant.exe
 
-CFLAGS         = $(CFLAGS) /DWIN32 /I"$(DEVEL_INCLUDE)" /I"$(DEVEL_INCLUDE)/libpng15" /D_CRT_SECURE_NO_WARNINGS
-LFLAGS         = $(LFLAGS) "/LIBPATH:$(DEVEL_LIB)"
+CFLAGS         = $(CFLAGS) /c /DWIN32 /I"$(DEVEL_INCLUDE)" /I"$(DEVEL_INCLUDE)/libpng15" /D_CRT_SECURE_NO_WARNINGS
+LFLAGS         = $(LFLAGS) "/LIBPATH:$(DEVEL_LIB)" 
 
 SRC_FILES = getopt_long.c\
-	pngquant.c\
 	rwpng.c\
+	pngquant.c\
 	pam.c\
 	mediancut.c\
 	blur.c\
 	mempool.c\
 	viter.c\
-	nearest.c
+	nearest.c\
 
-SRC_FILES = getopt.c\
+SRC_FILES = getopt_long.c\
 	pngquant.c\
+	rwpng.c\
+	pam.c
 
 all: init $(BIN)
 	@echo building version $(VERSION)
 
 $(BIN): $(SRC_FILES)
-	$(CC_NODEBUG) $(CFLAGS) $(LFLAGS) /lib:libpng_a.lib $(SRC_FILES)
+	$(CC_NODEBUG) $(CFLAGS)  $(SRC_FILES)
+	link.exe /incremental:no $(LFLAGS) libpng_a.lib $(BIN)
 
 init:
 	@if not exist $(DIR_BIN_X86) mkdir $(DIR_BIN_X86)
